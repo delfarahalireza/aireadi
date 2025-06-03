@@ -1,0 +1,1450 @@
+---
+title: "Raw data processing"
+format: html
+engine: knitr
+author: "Alireza Delfarah"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+vignette: |
+  %\VignetteIndexEntry{ST003519_demo}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+<style type="text/css">
+  body {
+  font-size: 14pt;
+  }
+h1.title {
+  font-size: 30pt;
+  }
+  h2.title {
+  font.size: 18pt;
+  }
+</style>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  width = 80,
+  fig.height = 8,
+  fig.width = 12,
+  echo = FALSE,
+  cache = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r libraries}
+# Load required libraries
+library(jsonlite)
+library(dplyr)
+library(tibble)
+library(tidyverse)
+```
+
+```{r steps}
+folder_id <- "dataset/wearable_activity_monitor/physical_activity/garmin_vivosmart5"
+folder_path = paste(getwd(), folder_id, sep = "/")
+
+# Function to extract activity data from a single JSON file
+extract_activity_data <- function(json_file_path) {
+  tryCatch({
+    # Read the JSON file
+    json_data <- fromJSON(json_file_path)
+    
+    # Extract activity data from the JSON structure
+    activities <- json_data$body$activity
+    
+    # Create a data frame with the extracted information
+    steps_data <- data.frame(
+      activity_name = activities$activity_name,
+      steps = activities$base_movement_quantity$value,
+      unit = activities$base_movement_quantity$unit,
+      start_time = activities$effective_time_frame$time_interval$start_date_time,
+      end_time = activities$effective_time_frame$time_interval$end_date_time,
+      stringsAsFactors = FALSE
+    )
+    
+    # Convert datetime strings to POSIXct format for easier manipulation
+    steps_data$start_time <- as.POSIXct(steps_data$start_time, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+    steps_data$end_time <- as.POSIXct(steps_data$end_time, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+    
+    # Extract date and time components from start_time
+    steps_data$start_date <- as.Date(steps_data$start_time)
+    steps_data$start_time_of_day <- format(steps_data$start_time, "%H:%M:%S")
+    steps_data$start_hour <- as.numeric(format(steps_data$start_time, "%H"))
+    
+    # Extract date and time components from end_time
+    steps_data$end_date <- as.Date(steps_data$end_time)
+    steps_data$end_time_of_day <- format(steps_data$end_time, "%H:%M:%S")
+    steps_data$end_hour <- as.numeric(format(steps_data$end_time, "%H"))
+    
+    # Add day number (relative to the first date in the dataset)
+    min_date <- min(steps_data$start_date)
+    steps_data$day_number <- as.numeric(steps_data$start_date - min_date) + 1
+    
+    # Calculate duration for each time frame (in minutes)
+    steps_data$duration_minutes <- as.numeric(difftime(steps_data$end_time, steps_data$start_time, units = "mins"))
+    
+    return(steps_data)
+    
+  }, error = function(e) {
+    cat("Error processing file:", json_file_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Get all subdirectories (participant folders)
+
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]  # Remove current directory
+
+# Initialize list to store data for all participants
+all_participants_data <- list()
+# Process each participant folder
+for (folder in participant_folders) {
+  id <- folder
+  #cat("Processing participant:", folder, "\n")
+  
+  # Look for JSON files in the participant folder
+  folder <- paste(folder_path, folder, sep = "/")
+  json_files <- list.files(path = folder, pattern = "\\.json$", full.names = TRUE)
+  
+  if (length(json_files) == 0) {
+    cat("  No JSON files found in folder:", folder, "\n")
+    next
+  }
+  
+  if (length(json_files) > 1) {
+    cat("  Multiple JSON files found. Using the first one:", basename(json_files[1]), "\n")
+  }
+  
+  # Extract data from the first JSON file found
+  participant_data <- extract_activity_data(json_files[1])
+  
+  if (!is.null(participant_data)) {
+    # Add participant ID to the data
+    participant_data$participant_id <- id
+    
+    # Store in the list
+    all_participants_data[[id]] <- participant_data
+    
+    #cat("  Successfully processed", nrow(participant_data), "records\n")
+    #cat("  Total steps for", folder, ":", sum(participant_data$steps), "\n")
+  }
+}
+
+# Display summary for all participants
+cat("\n=== OVERALL SUMMARY ===\n")
+cat("Number of participants processed:", length(all_participants_data), "\n")
+#cat("Participant IDs:", paste(names(all_participants_data), collapse = ", "), "\n")
+
+# Summary statistics for each participant
+for (participant_id in names(all_participants_data)) {
+  data <- all_participants_data[[participant_id]]
+  walking_data <- data %>% filter(steps > 0)
+}
+
+# Optional: Combine all data into a single dataframe
+#combined_data <- do.call(rbind, all_participants_data)
+#rownames(combined_data) <- NULL
+
+# Save combined data to CSV
+#write.csv(combined_data, "all_participants_steps_data.csv", row.names = FALSE)
+
+all_participants_steps <- all_participants_data
+```
+
+```{r heart rate}
+folder_id <- "dataset/wearable_activity_monitor/heart_rate/garmin_vivosmart5"
+folder_path = paste(getwd(), folder_id, sep = "/")
+
+# Function to extract heart rate data from a single JSON file
+extract_heartrate_data <- function(json_file_path) {
+  tryCatch({
+    # Read the JSON file
+    json_data <- fromJSON(json_file_path)
+    
+    # Extract heart rate data from the JSON structure
+    heartrate_records <- json_data$body$heart_rate
+    
+    # Create a data frame with the extracted information
+    heartrate_data <- data.frame(
+      heart_rate_bpm = heartrate_records$heart_rate$value,
+      unit = heartrate_records$heart_rate$unit,
+      timestamp = heartrate_records$effective_time_frame$date_time,
+      stringsAsFactors = FALSE
+    )
+    
+    # Convert datetime strings to POSIXct format
+    heartrate_data$timestamp <- as.POSIXct(heartrate_data$timestamp, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+    
+    # Extract date and time components
+    heartrate_data$date <- as.Date(heartrate_data$timestamp)
+    heartrate_data$time_of_day <- format(heartrate_data$timestamp, "%H:%M:%S")
+    heartrate_data$hour <- as.numeric(format(heartrate_data$timestamp, "%H"))
+    
+    # Add day number (relative to the first date in the dataset)
+    min_date <- min(heartrate_data$date)
+    heartrate_data$day_number <- as.numeric(heartrate_data$date - min_date) + 1
+    
+    # Sort by timestamp
+    heartrate_data <- heartrate_data[order(heartrate_data$timestamp), ]
+    
+    return(heartrate_data)
+    
+  }, error = function(e) {
+    cat("Error processing file:", json_file_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Get all subdirectories (participant folders)
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]  # Remove current directory
+
+# Initialize list to store heart rate data for all participants
+all_participants_heartrate <- list()
+# Process each participant folder
+for (folder in participant_folders) {
+  id <- folder
+  #cat("Processing participant:", folder, "\n")
+  
+  # Look for heart rate JSON files in the participant folder
+  folder <- paste(folder_path, folder, sep = "/")
+  heartrate_files <- list.files(path = folder, pattern = ".*heartrate.*\\.json$", full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(heartrate_files) == 0) {
+    cat("  No heart rate JSON files found in folder:", folder, "\n")
+    next
+  }
+  
+  if (length(heartrate_files) > 1) {
+    cat("  Multiple heart rate JSON files found. Using the first one:", basename(heartrate_files[1]), "\n")
+  }
+  
+  # Extract data from the first heart rate JSON file found
+  participant_heartrate <- extract_heartrate_data(heartrate_files[1])
+  
+  if (!is.null(participant_heartrate)) {
+    # Add participant ID to the data
+    participant_heartrate$participant_id <- id
+    
+    # Store in the list
+    all_participants_heartrate[[id]] <- participant_heartrate
+    
+    #cat("  Successfully processed", nrow(participant_heartrate), "heart rate records\n")
+    
+    # Calculate basic statistics (excluding zero values which might be errors/missing data)
+    valid_hr <- participant_heartrate$heart_rate_bpm[participant_heartrate$heart_rate_bpm > 0]
+    if (length(valid_hr) > 0) {
+      #cat("  Valid heart rate readings:", length(valid_hr), "\n")
+      #cat("  Mean heart rate:", round(mean(valid_hr), 1), "bpm\n")
+      #cat("  Heart rate range:", min(valid_hr), "-", max(valid_hr), "bpm\n")
+    } else {
+      cat("  No valid heart rate readings (all zero values)\n")
+    }
+  }
+}
+```
+
+```{r oxygen saturation}
+folder_id <- "dataset/wearable_activity_monitor/oxygen_saturation/garmin_vivosmart5"
+folder_path = paste(getwd(), folder_id, sep = "/")
+
+# Function to extract oxygen saturation data from a single JSON file
+extract_oxygen_saturation_data <- function(json_file_path) {
+  tryCatch({
+    # Read the JSON file as text first to handle NaN values
+    json_text <- readLines(json_file_path, warn = FALSE)
+    json_string <- paste(json_text, collapse = "")
+    
+    # Check if file is empty or contains only whitespace
+    if (nchar(trimws(json_string)) == 0) {
+      cat("  Warning: Empty JSON file:", basename(json_file_path), "\n")
+      return(NULL)
+    }
+    
+    # Replace NaN with null to make it valid JSON
+    clean_json <- gsub("\\bNaN\\b", "null", json_string)
+    
+    # Parse the cleaned JSON with error handling
+    json_data <- tryCatch({
+      fromJSON(clean_json, simplifyVector = FALSE)
+    }, error = function(e) {
+      cat("  Warning: JSON parsing failed for file:", basename(json_file_path), "\n")
+      cat("  JSON parse error:", e$message, "\n")
+      return(NULL)
+    })
+    
+    # Check if JSON parsing failed
+    if (is.null(json_data)) {
+      return(NULL)
+    }
+    
+    # Debug: Print the structure of json_data for troubleshooting
+    # Uncomment the next line to see what structure we're getting
+    # cat("  Debug - JSON structure class:", class(json_data), "length:", length(json_data), "\n")
+    
+    # Check if json_data is atomic (not a list)
+    if (is.atomic(json_data)) {
+      cat("  Warning: JSON returned atomic vector instead of list structure for file:", basename(json_file_path), "\n")
+      return(NULL)
+    }
+    
+    # Check if we have the expected JSON structure: body.breathing
+    if (!is.list(json_data) || is.null(json_data$body) || is.null(json_data$body$breathing)) {
+      cat("  Warning: Expected JSON structure (body.breathing) not found in file:", basename(json_file_path), "\n")
+      # Debug: Show what we actually got
+      if (is.list(json_data)) {
+        cat("  Available top-level keys:", paste(names(json_data), collapse = ", "), "\n")
+        if (!is.null(json_data$body) && is.list(json_data$body)) {
+          cat("  Available body keys:", paste(names(json_data$body), collapse = ", "), "\n")
+        }
+      }
+      return(NULL)
+    }
+    
+    # Extract the breathing/oxygen saturation records
+    records <- json_data$body$breathing
+    
+    if (length(records) == 0) {
+      cat("  Warning: No oxygen saturation records found in file:", basename(json_file_path), "\n")
+      return(NULL)
+    }
+    
+    # Initialize vectors to store extracted data
+    oxygen_values <- c()
+    units <- c()
+    timestamps <- c()
+    methods <- c()
+    
+    # Extract data from each record
+    for (i in seq_along(records)) {
+      record <- records[[i]]
+      
+      # Safely extract oxygen saturation value
+      if (!is.null(record$oxygen_saturation) && !is.null(record$oxygen_saturation$value)) {
+        oxygen_val <- record$oxygen_saturation$value
+        oxygen_values <- c(oxygen_values, ifelse(is.null(oxygen_val), NA, as.numeric(oxygen_val)))
+      } else {
+        oxygen_values <- c(oxygen_values, NA)
+      }
+      
+      # Safely extract unit
+      if (!is.null(record$oxygen_saturation) && !is.null(record$oxygen_saturation$unit)) {
+        units <- c(units, record$oxygen_saturation$unit)
+      } else {
+        units <- c(units, "%")  # Default unit
+      }
+      
+      # Safely extract timestamp
+      if (!is.null(record$effective_time_frame) && !is.null(record$effective_time_frame$date_time)) {
+        timestamps <- c(timestamps, record$effective_time_frame$date_time)
+      } else {
+        timestamps <- c(timestamps, NA)
+      }
+      
+      # Safely extract measurement method
+      if (!is.null(record$measurement_method)) {
+        methods <- c(methods, record$measurement_method)
+      } else {
+        methods <- c(methods, "unknown")
+      }
+    }
+    
+    # Create data frame
+    oxygen_data <- data.frame(
+      oxygen_saturation_percent = oxygen_values,
+      unit = units,
+      timestamp = timestamps,
+      measurement_method = methods,
+      stringsAsFactors = FALSE
+    )
+    
+    # Filter out rows where both oxygen_saturation_percent and timestamp are NA
+    # Comment out the next line if you want to keep all records including those with NaN values
+    oxygen_data <- oxygen_data[!is.na(oxygen_data$oxygen_saturation_percent) & !is.na(oxygen_data$timestamp), ]
+    
+    # Return empty data frame if no valid data remains
+    if (nrow(oxygen_data) == 0) {
+      return(data.frame(
+        oxygen_saturation_percent = numeric(0),
+        unit = character(0),
+        timestamp = as.POSIXct(character(0)),
+        measurement_method = character(0),
+        date = as.Date(character(0)),
+        time_of_day = character(0),
+        hour = numeric(0),
+        day_number = numeric(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # Convert datetime strings to POSIXct format (with error handling)
+    oxygen_data$timestamp <- tryCatch({
+      as.POSIXct(oxygen_data$timestamp, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+    }, error = function(e) {
+      # Try alternative formats if the first one fails
+      tryCatch({
+        as.POSIXct(oxygen_data$timestamp, tz = "UTC")
+      }, error = function(e2) {
+        cat("  Warning: Could not parse timestamp format\n")
+        rep(as.POSIXct(NA), nrow(oxygen_data))
+      })
+    })
+    
+    # Remove rows with invalid timestamps after conversion
+    oxygen_data <- oxygen_data[!is.na(oxygen_data$timestamp), ]
+    
+    # Check again if we have valid data after timestamp conversion
+    if (nrow(oxygen_data) == 0) {
+      return(data.frame(
+        oxygen_saturation_percent = numeric(0),
+        unit = character(0),
+        timestamp = as.POSIXct(character(0)),
+        measurement_method = character(0),
+        date = as.Date(character(0)),
+        time_of_day = character(0),
+        hour = numeric(0),
+        day_number = numeric(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # Extract date and time components
+    oxygen_data$date <- as.Date(oxygen_data$timestamp)
+    oxygen_data$time_of_day <- format(oxygen_data$timestamp, "%H:%M:%S")
+    oxygen_data$hour <- as.numeric(format(oxygen_data$timestamp, "%H"))
+    
+    # Add day number (relative to the first date in the dataset)
+    min_date <- min(oxygen_data$date)
+    oxygen_data$day_number <- as.numeric(oxygen_data$date - min_date) + 1
+    
+    # Sort by timestamp
+    oxygen_data <- oxygen_data[order(oxygen_data$timestamp), ]
+    
+    return(oxygen_data)
+    
+  }, error = function(e) {
+    cat("Error processing file:", json_file_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Get all subdirectories (participant folders)
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]  # Remove current directory
+
+# Initialize list to store oxygen saturation data for all participants
+all_participants_oxygen <- list()
+
+# Process each participant folder
+for (folder in participant_folders) {
+  id <- folder
+  #cat("Processing participant:", folder, "\n")
+  
+  # Look for oxygen saturation JSON files in the participant folder
+  folder <- paste(folder_path, folder, sep = "/")
+  oxygen_files <- list.files(path = folder, pattern = ".*oxygensaturation.*\\.json$", full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(oxygen_files) == 0) {
+    cat("  No oxygen saturation JSON files found in folder:", folder, "\n")
+    next
+  }
+  
+  if (length(oxygen_files) > 1) {
+    cat("  Multiple oxygen saturation JSON files found. Using the first one:", basename(oxygen_files[1]), "\n")
+  }
+  
+  # Extract data from the first oxygen saturation JSON file found
+  participant_oxygen <- extract_oxygen_saturation_data(oxygen_files[1])
+  
+  if (!is.null(participant_oxygen) && nrow(participant_oxygen) > 0) {
+    # Add participant ID to the data
+    participant_oxygen$participant_id <- id
+    
+    # Store in the list
+    all_participants_oxygen[[id]] <- participant_oxygen
+    
+    #cat("  Successfully processed", nrow(participant_oxygen), "oxygen saturation records\n")
+    
+    # Calculate basic statistics (excluding zero values which might be errors/missing data)
+    valid_oxygen <- participant_oxygen$oxygen_saturation_percent[participant_oxygen$oxygen_saturation_percent > 0]
+    # if (length(valid_oxygen) > 0) {
+    #   cat("  Valid oxygen saturation readings:", length(valid_oxygen), "\n")
+    #   cat("  Mean oxygen saturation:", round(mean(valid_oxygen), 1), "%\n")
+    #   cat("  Oxygen saturation range:", min(valid_oxygen), "-", max(valid_oxygen), "%\n")
+    #   
+    #   # Check for concerning low values (hypoxemia threshold)
+    #   low_oxygen <- sum(valid_oxygen < 90)
+    #   if (low_oxygen > 0) {
+    #     cat("  Readings below 90% (hypoxemia threshold):", low_oxygen, "\n")
+    #   }
+    # } else {
+    #   cat("  No valid oxygen saturation readings (all zero values)\n")
+    # }
+  } else {
+    cat("  No valid data found for participant:", id, "\n")
+  }
+}
+```
+
+```{r calories}
+folder_id <- "dataset/wearable_activity_monitor/physical_activity_calorie/garmin_vivosmart5"  # Adjust path as needed
+folder_path = paste(getwd(), folder_id, sep = "/")
+
+# Function to extract calorie data from a single JSON file
+extract_calorie_data <- function(json_file_path) {
+  tryCatch({
+    # Read the JSON file as text first to handle NaN values
+    json_text <- readLines(json_file_path, warn = FALSE)
+    json_string <- paste(json_text, collapse = "")
+    
+    # Check if file is empty or contains only whitespace
+    if (nchar(trimws(json_string)) == 0) {
+      cat("  Warning: Empty JSON file:", basename(json_file_path), "\n")
+      return(NULL)
+    }
+    
+    # Replace NaN with null to make it valid JSON
+    clean_json <- gsub("\\bNaN\\b", "null", json_string)
+    
+    # Parse the cleaned JSON with error handling
+    json_data <- tryCatch({
+      fromJSON(clean_json, simplifyVector = FALSE)
+    }, error = function(e) {
+      cat("  Warning: JSON parsing failed for file:", basename(json_file_path), "\n")
+      cat("  JSON parse error:", e$message, "\n")
+      return(NULL)
+    })
+    
+    # Check if JSON parsing failed
+    if (is.null(json_data)) {
+      return(NULL)
+    }
+    
+    # Debug: Print the structure of json_data for troubleshooting
+    # Uncomment the next line to see what structure we're getting
+    # cat("  Debug - JSON structure class:", class(json_data), "length:", length(json_data), "\n")
+    
+    # Check if json_data is atomic (not a list)
+    if (is.atomic(json_data)) {
+      cat("  Warning: JSON returned atomic vector instead of list structure for file:", basename(json_file_path), "\n")
+      return(NULL)
+    }
+    
+    # Check if we have the expected JSON structure: body.activity
+    if (!is.list(json_data) || is.null(json_data$body) || is.null(json_data$body$activity)) {
+      cat("  Warning: Expected JSON structure (body.activity) not found in file:", basename(json_file_path), "\n")
+      # Debug: Show what we actually got
+      if (is.list(json_data)) {
+        cat("  Available top-level keys:", paste(names(json_data), collapse = ", "), "\n")
+        if (!is.null(json_data$body) && is.list(json_data$body)) {
+          cat("  Available body keys:", paste(names(json_data$body), collapse = ", "), "\n")
+        }
+      }
+      return(NULL)
+    }
+    
+    # Extract the activity/calorie records
+    records <- json_data$body$activity
+    
+    if (length(records) == 0) {
+      cat("  Warning: No activity records found in file:", basename(json_file_path), "\n")
+      return(NULL)
+    }
+    
+    # Initialize vectors to store extracted data
+    calorie_values <- c()
+    units <- c()
+    timestamps <- c()
+    activity_names <- c()
+    
+    # Extract data from each record
+    for (i in seq_along(records)) {
+      record <- records[[i]]
+      
+      # Only process records with activity_name "kcal_burned"
+      if (!is.null(record$activity_name) && record$activity_name == "kcal_burned") {
+        
+        # Safely extract calorie value
+        if (!is.null(record$calories_value) && !is.null(record$calories_value$value)) {
+          calorie_val <- record$calories_value$value
+          calorie_values <- c(calorie_values, ifelse(is.null(calorie_val), NA, as.numeric(calorie_val)))
+        } else {
+          calorie_values <- c(calorie_values, NA)
+        }
+        
+        # Safely extract unit
+        if (!is.null(record$calories_value) && !is.null(record$calories_value$unit)) {
+          units <- c(units, record$calories_value$unit)
+        } else {
+          units <- c(units, "kcal")  # Default unit
+        }
+        
+        # Safely extract timestamp
+        if (!is.null(record$effective_time_frame) && !is.null(record$effective_time_frame$date_time)) {
+          timestamps <- c(timestamps, record$effective_time_frame$date_time)
+        } else {
+          timestamps <- c(timestamps, NA)
+        }
+        
+        # Extract activity name
+        activity_names <- c(activity_names, record$activity_name)
+      }
+    }
+    
+    # Return NULL if no kcal_burned records were found
+    if (length(calorie_values) == 0) {
+      cat("  Warning: No kcal_burned records found in file:", basename(json_file_path), "\n")
+      return(NULL)
+    }
+    
+    # Create data frame
+    calorie_data <- data.frame(
+      calories_burned = calorie_values,
+      unit = units,
+      timestamp = timestamps,
+      activity_name = activity_names,
+      stringsAsFactors = FALSE
+    )
+    
+    # Filter out rows where both calories_burned and timestamp are NA
+    # Comment out the next line if you want to keep all records including those with NaN values
+    calorie_data <- calorie_data[!is.na(calorie_data$calories_burned) & !is.na(calorie_data$timestamp), ]
+    
+    # Return empty data frame if no valid data remains
+    if (nrow(calorie_data) == 0) {
+      return(data.frame(
+        calories_burned = numeric(0),
+        unit = character(0),
+        timestamp = as.POSIXct(character(0)),
+        activity_name = character(0),
+        date = as.Date(character(0)),
+        time_of_day = character(0),
+        hour = numeric(0),
+        day_number = numeric(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # Convert datetime strings to POSIXct format (with error handling)
+    calorie_data$timestamp <- tryCatch({
+      as.POSIXct(calorie_data$timestamp, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+    }, error = function(e) {
+      # Try alternative formats if the first one fails
+      tryCatch({
+        as.POSIXct(calorie_data$timestamp, tz = "UTC")
+      }, error = function(e2) {
+        cat("  Warning: Could not parse timestamp format\n")
+        rep(as.POSIXct(NA), nrow(calorie_data))
+      })
+    })
+    
+    # Remove rows with invalid timestamps after conversion
+    calorie_data <- calorie_data[!is.na(calorie_data$timestamp), ]
+    
+    # Check again if we have valid data after timestamp conversion
+    if (nrow(calorie_data) == 0) {
+      return(data.frame(
+        calories_burned = numeric(0),
+        unit = character(0),
+        timestamp = as.POSIXct(character(0)),
+        activity_name = character(0),
+        date = as.Date(character(0)),
+        time_of_day = character(0),
+        hour = numeric(0),
+        day_number = numeric(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # Extract date and time components
+    calorie_data$date <- as.Date(calorie_data$timestamp)
+    calorie_data$time_of_day <- format(calorie_data$timestamp, "%H:%M:%S")
+    calorie_data$hour <- as.numeric(format(calorie_data$timestamp, "%H"))
+    
+    # Add day number (relative to the first date in the dataset)
+    min_date <- min(calorie_data$date)
+    calorie_data$day_number <- as.numeric(calorie_data$date - min_date) + 1
+    
+    # Sort by timestamp
+    calorie_data <- calorie_data[order(calorie_data$timestamp), ]
+    
+    return(calorie_data)
+    
+  }, error = function(e) {
+    cat("Error processing file:", json_file_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Get all subdirectories (participant folders)
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]  # Remove current directory
+
+# Initialize list to store calorie data for all participants
+all_participants_calories <- list()
+
+# Process each participant folder
+for (folder in participant_folders) {
+  id <- folder
+  #cat("Processing participant:", folder, "\n")
+  
+  # Look for calorie JSON files in the participant folder
+  folder <- paste(folder_path, folder, sep = "/")
+  calorie_files <- list.files(path = folder, pattern = ".*calorie.*\\.json$|.*kcal.*\\.json$", full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(calorie_files) == 0) {
+    cat("  No calorie JSON files found in folder:", folder, "\n")
+    next
+  }
+  
+  if (length(calorie_files) > 1) {
+    cat("  Multiple calorie JSON files found. Using the first one:", basename(calorie_files[1]), "\n")
+  }
+  
+  # Extract data from the first calorie JSON file found
+  participant_calories <- extract_calorie_data(calorie_files[1])
+  
+  if (!is.null(participant_calories) && nrow(participant_calories) > 0) {
+    # Add participant ID to the data
+    participant_calories$participant_id <- id
+    
+    # Store in the list
+    all_participants_calories[[id]] <- participant_calories
+    
+    #cat("  Successfully processed", nrow(participant_calories), "calorie records\n")
+    
+    # Calculate basic statistics
+    valid_calories <- participant_calories$calories_burned[participant_calories$calories_burned > 0]
+    # if (length(valid_calories) > 0) {
+    #   cat("  Valid calorie readings:", length(valid_calories), "\n")
+    #   cat("  Total calories burned:", sum(valid_calories), "kcal\n")
+    #   cat("  Mean calories per reading:", round(mean(valid_calories), 1), "kcal\n")
+    #   cat("  Calorie range:", min(valid_calories), "-", max(valid_calories), "kcal\n")
+    # } else {
+    #   cat("  No valid calorie readings (all zero values)\n")
+    # }
+  } else {
+    cat("  No valid data found for participant:", id, "\n")
+  }
+}
+```
+
+```{r respiratory rate}
+folder_id <- "dataset/wearable_activity_monitor/respiratory_rate/garmin_vivosmart5"
+folder_path = paste(getwd(), folder_id, sep = "/")
+
+# Function to extract respiratory rate data from a single JSON file
+extract_respiratory_data <- function(json_file_path) {
+  tryCatch({
+    # Read the JSON file
+    json_data <- fromJSON(json_file_path)
+    
+    # Extract respiratory rate data from the JSON structure
+    respiratory_records <- json_data$body$breathing
+    
+    # Create a data frame with the extracted information
+    respiratory_data <- data.frame(
+      respiratory_rate_bpm = respiratory_records$respiratory_rate$value,
+      unit = respiratory_records$respiratory_rate$unit,
+      timestamp = respiratory_records$effective_time_frame$date_time,
+      stringsAsFactors = FALSE
+    )
+    
+    # Convert datetime strings to POSIXct format
+    respiratory_data$timestamp <- as.POSIXct(respiratory_data$timestamp, format = "%Y-%m-%dT%H:%M:%S", tz = "UTC")
+    
+    # Extract date and time components
+    respiratory_data$date <- as.Date(respiratory_data$timestamp)
+    respiratory_data$time_of_day <- format(respiratory_data$timestamp, "%H:%M:%S")
+    respiratory_data$hour <- as.numeric(format(respiratory_data$timestamp, "%H"))
+    
+    # Add day number (relative to the first date in the dataset)
+    min_date <- min(respiratory_data$date)
+    respiratory_data$day_number <- as.numeric(respiratory_data$date - min_date) + 1
+    
+    # Sort by timestamp
+    respiratory_data <- respiratory_data[order(respiratory_data$timestamp), ]
+    
+    return(respiratory_data)
+    
+  }, error = function(e) {
+    cat("Error processing file:", json_file_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Get all subdirectories (participant folders)
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]  # Remove current directory
+
+# Initialize list to store respiratory rate data for all participants
+all_participants_respiratory <- list()
+
+# Process each participant folder
+for (folder in participant_folders) {
+  id <- folder
+  #cat("Processing participant:", folder, "\n")
+  
+  # Look for respiratory rate JSON files in the participant folder
+  folder <- paste(folder_path, folder, sep = "/")
+  respiratory_files <- list.files(path = folder, pattern = ".*respiratory.*\\.json$", full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(respiratory_files) == 0) {
+    cat("  No respiratory rate JSON files found in folder:", folder, "\n")
+    next
+  }
+  
+  if (length(respiratory_files) > 1) {
+    cat("  Multiple respiratory rate JSON files found. Using the first one:", basename(respiratory_files[1]), "\n")
+  }
+  
+  # Extract data from the first respiratory rate JSON file found
+  participant_respiratory <- extract_respiratory_data(respiratory_files[1])
+  
+  if (!is.null(participant_respiratory)) {
+    # Add participant ID to the data
+    participant_respiratory$participant_id <- id
+    
+    # Store in the list
+    all_participants_respiratory[[id]] <- participant_respiratory
+    
+    #cat("  Successfully processed", nrow(participant_respiratory), "respiratory rate records\n")
+    
+    # Calculate basic statistics (excluding zero values which might be errors/missing data)
+    valid_rr <- participant_respiratory$respiratory_rate_bpm[participant_respiratory$respiratory_rate_bpm > 0]
+    if (length(valid_rr) > 0) {
+      #cat("  Valid respiratory rate readings:", length(valid_rr), "\n")
+      #cat("  Mean respiratory rate:", round(mean(valid_rr), 1), "breaths/min\n")
+      #cat("  Respiratory rate range:", min(valid_rr), "-", max(valid_rr), "breaths/min\n")
+    } else {
+      cat("  No valid respiratory rate readings (all zero values)\n")
+    }
+  }
+}
+```
+
+```{r sleep}
+folder_id <- "dataset/wearable_activity_monitor/sleep/garmin_vivosmart5"
+folder_path = paste(getwd(), folder_id, sep = "/")
+
+# Function to extract sleep data from a single JSON file
+extract_sleep_data <- function(json_file_path) {
+  tryCatch({
+    # Read the JSON file
+    json_data <- fromJSON(json_file_path)
+    
+    # Check if sleep data exists
+    if (is.null(json_data$body$sleep) || length(json_data$body$sleep) == 0) {
+      cat("  No sleep data found in JSON structure for file:", basename(json_file_path), "\n")
+      return(data.frame())  # Return empty dataframe instead of NULL
+    }
+    
+    # Extract sleep data from the JSON structure
+    sleep_records <- json_data$body$sleep
+    
+    # Create a data frame with the extracted information
+    sleep_data <- data.frame(
+      sleep_stage_state = sleep_records$sleep_stage_state,
+      start_time = sleep_records$sleep_stage_time_frame$time_interval$start_date_time,
+      end_time = sleep_records$sleep_stage_time_frame$time_interval$end_date_time,
+      stringsAsFactors = FALSE
+    )
+    
+    # Remove rows with missing essential data
+    sleep_data <- sleep_data[!is.na(sleep_data$start_time) & !is.na(sleep_data$end_time), ]
+    
+    if (nrow(sleep_data) == 0) {
+      cat("  No valid sleep records after filtering for file:", basename(json_file_path), "\n")
+      return(data.frame())
+    }
+    
+    # Convert datetime strings to POSIXct format
+    sleep_data$start_time <- as.POSIXct(sleep_data$start_time, format = "%Y-%m-%dT%H:%M:%S", tz = "UTC")
+    sleep_data$end_time <- as.POSIXct(sleep_data$end_time, format = "%Y-%m-%dT%H:%M:%S", tz = "UTC")
+    
+    # Extract date and time components from start_time
+    sleep_data$start_date <- as.Date(sleep_data$start_time)
+    sleep_data$start_time_of_day <- format(sleep_data$start_time, "%H:%M:%S")
+    sleep_data$start_hour <- as.numeric(format(sleep_data$start_time, "%H"))
+    
+    # Extract date and time components from end_time
+    sleep_data$end_date <- as.Date(sleep_data$end_time)
+    sleep_data$end_time_of_day <- format(sleep_data$end_time, "%H:%M:%S")
+    sleep_data$end_hour <- as.numeric(format(sleep_data$end_time, "%H"))
+    
+    # Add day number (relative to the first date in the dataset)
+    min_date <- min(sleep_data$start_date)
+    sleep_data$day_number <- as.numeric(sleep_data$start_date - min_date) + 1
+    
+    # Calculate duration for each sleep stage (in minutes)
+    sleep_data$duration_minutes <- as.numeric(difftime(sleep_data$end_time, sleep_data$start_time, units = "mins"))
+    
+    # Calculate duration in hours for easier interpretation
+    sleep_data$duration_hours <- sleep_data$duration_minutes / 60
+    
+    # Sort by start time
+    sleep_data <- sleep_data[order(sleep_data$start_time), ]
+    
+    return(sleep_data)
+    
+  }, error = function(e) {
+    cat("Error processing file:", json_file_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(data.frame())  # Return empty dataframe instead of NULL
+  })
+}
+
+# Get all subdirectories (participant folders)
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]  # Remove current directory
+
+# Initialize list to store sleep data for all participants
+all_participants_sleep <- list()
+
+# Process each participant folder
+for (folder in participant_folders) {
+  id <- folder
+  #cat("Processing participant:", folder, "\n")
+  
+  # Look for sleep JSON files in the participant folder
+  folder <- paste(folder_path, folder, sep = "/")
+  sleep_files <- list.files(path = folder, pattern = ".*sleep.*\\.json$", full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(sleep_files) == 0) {
+    cat("  No sleep JSON files found in folder:", folder, "\n")
+    next
+  }
+  
+  if (length(sleep_files) > 1) {
+    cat("  Multiple sleep JSON files found. Using the first one:", basename(sleep_files[1]), "\n")
+  }
+  
+  # Extract data from the first sleep JSON file found
+  participant_sleep <- extract_sleep_data(sleep_files[1])
+  
+  # Check if dataframe has data before adding participant_id
+  if (!is.null(participant_sleep) && nrow(participant_sleep) > 0) {
+    # Add participant ID to the data
+    participant_sleep$participant_id <- id
+    
+    # Store in the list
+    all_participants_sleep[[id]] <- participant_sleep
+    
+    #cat("  Successfully processed", nrow(participant_sleep), "sleep stage records\n")
+    
+    # Calculate sleep stage statistics
+    # Total sleep time per night (assuming each participant has data from one night)
+    total_sleep_hours <- sum(participant_sleep$duration_hours)
+    
+    # Sleep stage breakdown
+    stage_summary <- aggregate(duration_hours ~ sleep_stage_state, 
+                              data = participant_sleep, 
+                              FUN = sum)
+    
+    #cat("  Total sleep time:", round(total_sleep_hours, 2), "hours\n")
+    #cat("  Sleep stages breakdown:\n")
+    #for (i in 1:nrow(stage_summary)) {
+    #  cat("    ", stage_summary$sleep_stage_state[i], ":", 
+    #      round(stage_summary$duration_hours[i], 2), "hours\n")
+    #}
+    
+    # Sleep efficiency metrics
+    unique_dates <- unique(participant_sleep$start_date)
+    #cat("  Number of sleep sessions:", length(unique_dates), "\n")
+  } else {
+    cat("  No valid sleep data found for participant:", id, "\n")
+  }
+}
+```
+
+```{r stress}
+folder_id <- "dataset/wearable_activity_monitor/stress/garmin_vivosmart5"
+folder_path = paste(getwd(), folder_id, sep = "/")
+
+# Function to extract stress data from a single JSON file
+extract_stress_data <- function(json_file_path) {
+  tryCatch({
+    # Read the JSON file
+    json_data <- fromJSON(json_file_path)
+    
+    # Extract stress data from the JSON structure
+    stress_records <- json_data$body$stress
+    
+    # Create a data frame with the extracted information
+    stress_data <- data.frame(
+      stress_level = stress_records$stress$value,
+      unit = stress_records$stress$unit,
+      timestamp = stress_records$effective_time_frame$date_time,
+      stringsAsFactors = FALSE
+    )
+    
+    # Convert datetime strings to POSIXct format
+    stress_data$timestamp <- as.POSIXct(stress_data$timestamp, format = "%Y-%m-%dT%H:%M:%S", tz = "UTC")
+    
+    # Extract date and time components
+    stress_data$date <- as.Date(stress_data$timestamp)
+    stress_data$time_of_day <- format(stress_data$timestamp, "%H:%M:%S")
+    stress_data$hour <- as.numeric(format(stress_data$timestamp, "%H"))
+    
+    # Add day number (relative to the first date in the dataset)
+    min_date <- min(stress_data$date)
+    stress_data$day_number <- as.numeric(stress_data$date - min_date) + 1
+    
+    # Add stress level categories (assuming typical stress scale 0-100)
+    stress_data$stress_category <- cut(stress_data$stress_level,
+                                     breaks = c(-1, 25, 50, 75, 100),
+                                     labels = c("Low", "Moderate", "High", "Very High"),
+                                     include.lowest = TRUE)
+    
+    # Sort by timestamp
+    stress_data <- stress_data[order(stress_data$timestamp), ]
+    
+    return(stress_data)
+    
+  }, error = function(e) {
+    cat("Error processing file:", json_file_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Get all subdirectories (participant folders)
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]  # Remove current directory
+
+# Initialize list to store stress data for all participants
+all_participants_stress <- list()
+
+# Process each participant folder
+for (folder in participant_folders) {
+  id <- folder
+  #cat("Processing participant:", folder, "\n")
+  
+  # Look for stress JSON files in the participant folder
+  folder <- paste(folder_path, folder, sep = "/")
+  stress_files <- list.files(path = folder, pattern = ".*stress.*\\.json$", full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(stress_files) == 0) {
+    cat("  No stress JSON files found in folder:", folder, "\n")
+    next
+  }
+  
+  if (length(stress_files) > 1) {
+    cat("  Multiple stress JSON files found. Using the first one:", basename(stress_files[1]), "\n")
+  }
+  
+  # Extract data from the first stress JSON file found
+  participant_stress <- extract_stress_data(stress_files[1])
+  
+  if (!is.null(participant_stress)) {
+    # Add participant ID to the data
+    participant_stress$participant_id <- id
+    
+    # Store in the list
+    all_participants_stress[[id]] <- participant_stress
+    
+    #cat("  Successfully processed", nrow(participant_stress), "stress records\n")
+    
+    # Calculate basic statistics (excluding negative values which might be errors/missing data)
+    valid_stress <- participant_stress$stress_level[participant_stress$stress_level >= 0]
+    if (length(valid_stress) > 0) {
+      #cat("  Valid stress readings:", length(valid_stress), "\n")
+      #cat("  Mean stress level:", round(mean(valid_stress), 1), "\n")
+      #cat("  Stress level range:", min(valid_stress), "-", max(valid_stress), "\n")
+      
+      # Stress category distribution
+      stress_categories <- table(participant_stress$stress_category)
+      #cat("  Stress level distribution:\n")
+      #for (category in names(stress_categories)) {
+      #  if (!is.na(category)) {
+      #    cat("    ", category, ":", stress_categories[category], "readings\n")
+      #  }
+      #}
+    } else {
+      cat("  No valid stress readings (all negative values)\n")
+    }
+  }
+}
+```
+
+```{r cgm}
+folder_id <- "dataset/wearable_blood_glucose/continuous_glucose_monitoring/dexcom_g6"
+folder_path <- file.path(getwd(), folder_id)
+
+# Function to extract CGM data from a single JSON file
+extract_cgm_data <- function(json_file_path) {
+  tryCatch({
+    json_data <- fromJSON(json_file_path, simplifyVector = FALSE)
+    
+    # Safely extract cgm records
+    cgm_records <- json_data$body$cgm
+    
+    # Handle the case where there's only one CGM record
+    if (!is.list(cgm_records) || (!is.null(names(cgm_records)) && !is.null(cgm_records$blood_glucose))) {
+      cgm_records <- list(cgm_records)
+    }
+    
+    # Defensive parsing
+    cgm_data <- do.call(rbind, lapply(cgm_records, function(x) {
+      if (is.null(x$blood_glucose) || is.null(x$effective_time_frame$time_interval$start_date_time)) {
+        return(NULL)  # Skip malformed or missing entries
+      }
+      
+      data.frame(
+        glucose_value = as.numeric(x$blood_glucose$value),
+        unit = x$blood_glucose$unit,
+        timestamp = x$effective_time_frame$time_interval$start_date_time,
+        stringsAsFactors = FALSE
+      )
+    }))
+    
+    # If nothing was parsed successfully
+    if (is.null(cgm_data) || nrow(cgm_data) == 0) {
+      stop("No valid CGM entries found")
+    }
+    
+    # Time parsing
+    cgm_data$timestamp <- as.POSIXct(cgm_data$timestamp, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+    cgm_data$date <- as.Date(cgm_data$timestamp)
+    cgm_data$time_of_day <- format(cgm_data$timestamp, "%H:%M:%S")
+    cgm_data$hour <- as.numeric(format(cgm_data$timestamp, "%H"))
+    min_date <- min(cgm_data$date)
+    cgm_data$day_number <- as.numeric(cgm_data$date - min_date) + 1
+    
+    # Sort by time
+    cgm_data <- cgm_data[order(cgm_data$timestamp), ]
+    
+    return(cgm_data)
+    
+  }, error = function(e) {
+    cat("Error processing file:", json_file_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+
+# Get all subdirectories (participant folders)
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]
+
+# Initialize list to store CGM data
+all_participants_cgm <- list()
+
+# Process each participant folder
+for (folder in participant_folders) {
+  id <- folder
+  folder_path_full <- file.path(folder_path, folder)
+  
+  cgm_files <- list.files(path = folder_path_full, pattern = ".*DEX.*\\.json$", full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(cgm_files) == 0) {
+    cat("  No CGM JSON files found in folder:", folder_path_full, "\n")
+    next
+  }
+  
+  if (length(cgm_files) > 1) {
+    cat("  Multiple CGM JSON files found. Using the first one:", basename(cgm_files[1]), "\n")
+  }
+  
+  participant_cgm <- extract_cgm_data(cgm_files[1])
+  
+  if (!is.null(participant_cgm)) {
+    participant_cgm$participant_id <- id
+    all_participants_cgm[[id]] <- participant_cgm
+    
+    valid_glucose <- participant_cgm$glucose_value[participant_cgm$glucose_value > 0]
+    if (length(valid_glucose) > 0) {
+      # cat("Participant:", id, "\n")
+      # cat("  Readings:", length(valid_glucose), "\n")
+      # cat("  Mean glucose:", round(mean(valid_glucose), 1), "\n")
+      # cat("  Glucose range:", min(valid_glucose), "-", max(valid_glucose), "\n")
+    } else {
+      cat("  No valid glucose readings (non-positive values)\n")
+    }
+  }
+}
+
+```
+
+```{r}
+record <- wfdb$rdrecord("/Users/delfarah/Desktop/aireadi/dataset/cardiac_ecg/ecg_12lead/philips_tc30/1001/1001_ecg_25aafb4b")
+str(record)
+print(dim(record$p_signal))
+```
+
+
+```{r ecg}
+# install.packages("reticulate")
+# reticulate::py_install(c("wfdb", "biosppy", "matplotlib", "numpy"))
+#reticulate::py_install("peakutils")
+library(reticulate)
+
+folder_id <- "dataset/cardiac_ecg/ecg_12lead/philips_tc30"
+folder_path <- file.path(getwd(), folder_id)
+
+# Use a conda or virtualenv environment if needed
+# use_condaenv("your-env")  # optional
+
+# Import required Python modules
+wfdb <- import("wfdb")
+biosppy <- import("biosppy.signals.ecg")
+np <- import("numpy")
+
+# Function to extract features from one ECG file
+library(reticulate)
+library(tibble)
+
+
+extract_ecg_features <- function(base_path) {
+  tryCatch({
+    record <- wfdb$rdrecord(base_path)
+
+    if (is.null(record) || is.null(record$p_signal) || length(dim(record$p_signal)) < 2) {
+      cat("Error: Problem reading record or p_signal for:", base_path, "\n")
+      if (!is.null(record) && !is.null(record$p_signal)) {
+        cat("  Dimensions of p_signal:", paste(dim(record$p_signal), collapse = "x"), "\n")
+      }
+      return(NULL)
+    }
+    
+    participant_id <- basename(dirname(base_path)) 
+    cat("Processing Participant ID:", participant_id, "\n")
+    
+    # --- Extract time and date information ---
+    record_date <- NULL
+    record_time <- NULL
+    recording_datetime <- NULL 
+
+    if (!is.null(record$base_date)) {
+      record_date <- py_to_r(record$base_date) 
+    }
+    if (!is.null(record$base_time)) {
+      record_time <- py_to_r(record$base_time) 
+    }
+
+    if (!is.null(record_date) && !is.null(record_time)) {
+      if (inherits(record_date, "Date") && inherits(record_time, c("hms", "character"))) {
+          time_str <- as.character(record_time) 
+          datetime_str <- paste(as.character(record_date), time_str)
+          recording_datetime <- as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "UTC") 
+      } else {
+          cat("  Warning: Could not combine date and time into a single POSIXct object for:", base_path, "\n")
+      }
+    }
+
+    cat("Dimensions of p_signal:", paste(dim(record$p_signal), collapse = "x"), "\n")
+    cat("Available signal names:", paste(record$sig_name, collapse = ", "), "\n")
+
+    p_signal_r_matrix <- py_to_r(record$p_signal)
+    signal <- p_signal_r_matrix[, 1] # Select the first lead (Lead I)
+    
+    if (is.null(signal) || !is.numeric(signal) || length(signal) == 0) {
+      cat("Error: 'signal' is invalid or empty after selection for:", base_path, "\n")
+      return(NULL)
+    }
+
+    fs <- record$fs
+    
+    cat("Signal length:", length(signal), "samples\n")
+    
+    if (length(signal) <= 2253) { 
+      cat("  Skipping: signal too short (", length(signal), "samples)\n")
+      return(NULL)
+    }
+
+    ecg <- import("biosppy.signals.ecg") 
+    out_py <- ecg$ecg(signal = signal, sampling_rate = fs, show = FALSE)
+    
+    out_dict_py <- out_py$as_dict() 
+    out_r_list <- py_to_r(out_dict_py) 
+
+    rpeaks <- NULL 
+    heart_rate <- NULL 
+
+    if ("rpeaks" %in% names(out_r_list)) {
+      rpeaks <- out_r_list$rpeaks
+    } else {
+      cat("  Warning: 'rpeaks' element not found in biosppy output (after dict conversion) for:", base_path, "\n")
+      return(NULL) 
+    }
+
+    if ("heart_rate" %in% names(out_r_list)) {
+      heart_rate <- out_r_list$heart_rate
+    } else {
+      cat("  Warning: 'heart_rate' element not found in biosppy output (after dict conversion) for:", base_path, "\n")
+      return(NULL) 
+    }
+    
+    if (is.null(rpeaks) || length(rpeaks) < 2) {
+      cat("  Skipping: Not enough R-peaks found (", length(rpeaks), ") or rpeaks is NULL for RR-intervals for:", base_path, "\n")
+      return(NULL)
+    }
+    
+    rr_intervals <- diff(rpeaks) / fs # Still calculate original rr_intervals
+    
+    if (is.null(heart_rate) || length(heart_rate) == 0) {
+      cat("  Skipping: Heart rate data is missing or empty for:", base_path, "\n")
+      return(NULL)
+    }
+
+    # --- NEW: Align and pad beat-level data for unnesting ---
+    # Target length will be the number of rpeaks
+    num_rpeaks <- length(rpeaks)
+
+    # Pad rr_intervals: It's always length(rpeaks) - 1. Add NA at the beginning to align with rpeaks.
+    aligned_rr_intervals <- c(NA, rr_intervals) 
+
+    # Pad heart_rate: Biosppy's heart_rate is usually length(rpeaks) - 1.
+    # Pad it to match rpeaks length.
+    aligned_heart_rate <- c(NA, heart_rate)
+    
+    # Ensure both padded vectors are exactly num_rpeaks long, just in case heart_rate was shorter/longer
+    if (length(aligned_rr_intervals) < num_rpeaks) {
+      aligned_rr_intervals <- c(aligned_rr_intervals, rep(NA, num_rpeaks - length(aligned_rr_intervals)))
+    } else if (length(aligned_rr_intervals) > num_rpeaks) { # Truncate if somehow longer
+      aligned_rr_intervals <- head(aligned_rr_intervals, num_rpeaks)
+    }
+
+    if (length(aligned_heart_rate) < num_rpeaks) {
+      aligned_heart_rate <- c(aligned_heart_rate, rep(NA, num_rpeaks - length(aligned_heart_rate)))
+    } else if (length(aligned_heart_rate) > num_rpeaks) { # Truncate if somehow longer
+      aligned_heart_rate <- head(aligned_heart_rate, num_rpeaks)
+    }
+
+    # Create a nested tibble containing the aligned beat-level data
+    # This inner tibble will have columns of equal length (num_rpeaks)
+    beat_data_tibble <- tibble(
+      rpeak_index = rpeaks,           # Index of the R-peak in the original signal
+      rr_interval_s = aligned_rr_intervals, # RR-interval in seconds (NA for first peak)
+      heart_rate_bpm = aligned_heart_rate   # Heart rate in BPM (NA for first peak)
+    )
+
+    # --- Return the main tibble with the nested 'beat_data' list-column ---
+    participant_df <- tibble(
+      participant_id = participant_id, 
+      record_date = record_date, 
+      record_time = record_time, 
+      recording_datetime = recording_datetime, 
+      mean_hr = mean(heart_rate, na.rm = TRUE), # These use the original heart_rate vector
+      sdnn = sd(rr_intervals, na.rm = TRUE),   # These use the original rr_intervals vector
+      beat_data = list(beat_data_tibble) # The nested tibble becomes a list-column
+    )
+    return(participant_df)
+    
+  }, error = function(e) {
+    cat("Error processing file:", base_path, "\n")
+    cat("Error message:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+participant_folders <- list.dirs(path = folder_path, recursive = FALSE, full.names = FALSE)
+participant_folders <- participant_folders[participant_folders != "."]
+
+# --- Initialize list to store data frames (each with the nested beat_data list-column) ---
+all_participants_ecg_raw <- list()
+
+for (folder in participant_folders) {
+  folder_path_full <- file.path(folder_path, folder)
+  files <- list.files(folder_path_full, pattern = "\\.hea$", full.names = TRUE)
+  
+  if (length(files) == 0) {
+    cat("No .hea files found in folder:", folder, "\n")
+    next 
+  }
+  
+  base_path <- sub("\\.hea$", "", files[1]) 
+  
+  features_tibble <- extract_ecg_features(base_path)
+  
+  if (!is.null(features_tibble)) {
+    all_participants_ecg_raw[[length(all_participants_ecg_raw) + 1]] <- features_tibble
+  }
+}
+
+# --- Post-processing: Combine and Flatten to Long Format ---
+cat("\n--- Combining and Flattening Data ---\n")
+
+if (length(all_participants_ecg_raw) == 0) {
+  cat("No data was successfully extracted from any participant.\n")
+  al_participant_ecg <- tibble() # Create an empty tibble
+} else {
+  # 1. Combine all individual participant tibbles into one large tibble
+  combined_ecg_data <- bind_rows(all_participants_ecg_raw)
+  
+  # 2. Use unnest() on the single 'beat_data' list-column
+  # This will expand the rows for each beat, and all columns within 'beat_data'
+  # are now guaranteed to be of equal length due to the padding in extract_ecg_features.
+  al_participant_ecg <- combined_ecg_data %>%
+    unnest(beat_data) # Only unnest the 'beat_data' list-column
+  
+  cat("Successfully created a single, long-format data frame.\n")
+  cat("Final data frame dimensions:", dim(al_participant_ecg)[1], "rows,", dim(al_participant_ecg)[2], "columns.\n")
+}
+
+```
+
+```{r clinical}
+folder_id <- "dataset/clinical_data"
+folder_path <- file.path(getwd(), folder_id)
+
+csv_files <- list.files(path = folder_path, pattern = "\\.csv$", full.names = TRUE)
+
+# Initialize an empty list to store the data frames
+all_clinical <- list()
+
+# Check if any CSV files were found
+if (length(csv_files) == 0) {
+  message("No CSV files found in the specified directory: ", csv_directory)
+} else {
+  # Loop through each CSV file
+  for (file_path in csv_files) {
+    # Extract the file name without the extension to use as a list element name
+    file_name <- tools::file_path_sans_ext(basename(file_path))
+    
+    cat("Reading file: ", basename(file_path), "\n")
+    
+    # Use tryCatch for robust error handling in case a file is malformed
+    tryCatch({
+      # Read the CSV file into a tibble
+      df <- read_csv(file_path, show_col_types = FALSE) # show_col_types = FALSE suppresses the column type message for each file
+      
+      # Store the data frame in the list using its name
+      all_clinical[[file_name]] <- df
+      
+      cat("  Successfully read '", file_name, "'. Dimensions: ", nrow(df), " rows, ", ncol(df), " columns.\n", sep = "")
+      
+    }, error = function(e) {
+      cat("  Error reading file '", basename(file_path), "': ", e$message, "\n", sep = "")
+    })
+  }
+}
+```
+
+```{r save data}
+saveRDS(all_participants_steps, "aireadi_steps.rda")
+saveRDS(all_participants_heartrate, "aireadi_hr.rda")
+saveRDS(all_participants_sleep, "aireadi_sleep.rda")
+saveRDS(all_participants_stress, "aireadi_stress.rda")
+saveRDS(all_participants_calories, "aireadi_kcal.rda")
+saveRDS(all_participants_respiratory, "aireadi_respiratory.rda")
+saveRDS(all_participants_oxygen, "aireadi_oxygen.rda")
+saveRDS(all_participants_cgm, "aireadi_cgm.rda")
+saveRDS(all_participants_ecg, "aireadi_ecg.rda")
+saveRDS(all_clinical, "aireadi_clinical.rda")
+```

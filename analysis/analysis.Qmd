@@ -1,0 +1,472 @@
+---
+title: "AI-READI Exploratory Analysis"
+author: "Alireza Delfarah"
+date: "`r Sys.Date()`"
+engine: knitr
+
+format: 
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    code-summary: "Show R Code"
+    theme: flatly
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+  
+```{r setup, include = FALSE}
+# Load required libraries
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(gridExtra)
+library(DT)
+library(plotly)
+library(knitr)
+library(kableExtra)
+
+# Set global options
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load column information
+col_info <- read_csv("col_df.csv")
+```
+
+```{r read data}
+data_steps <- readRDS("aireadi_steps.rda")
+data_hr <- readRDS("aireadi_hr.rda")
+data_sleep <- readRDS("aireadi_sleep.rda")
+data_stress <- readRDS("aireadi_stress.rda")
+data_kcal <- readRDS("aireadi_kcal.rda")
+data_rr <- readRDS("aireadi_respiratory.rda")
+data_oxygen <- readRDS("aireadi_oxygen.rda")
+data_cgm <- readRDS("aireadi_cgm.rda")
+data_ecg <- readRDS("aireadi_ecg.rda")
+data_clinical <- readRDS("aireadi_clinical.rda")
+```
+
+## Overview
+
+This document provides a comprehensive analysis of health data coverage across multiple modalities. The analysis examines:
+
+1. **Number of subjects** present in each data modality
+2. **Days of data available** per subject in each modality
+
+```{r data-analysis-functions}
+# Function to analyze data coverage
+analyze_data_coverage <- function(data_list, modality_name, col_info) {
+  
+  # Get column names for this modality
+  modality_cols <- col_info %>% 
+    filter(modality == paste0("col_", modality_name)) %>%
+    select(-modality) %>%
+    unlist() %>%
+    na.omit() %>%
+    as.character()
+  
+  # Find timestamp/date columns
+  date_cols <- modality_cols[grepl("date|timestamp|start_time|end_time", modality_cols)]
+  participant_col <- modality_cols[grepl("participant_id", modality_cols)][1]
+  
+  # Number of subjects
+  n_subjects <- length(data_list)
+  
+  # Analyze each subject's data
+  subject_results <- list()
+  
+  for (i in 1:length(data_list)) {
+    df <- data_list[[i]]
+    subject_id <- paste0("Subject_", i)
+    
+    if (!is.null(df) && nrow(df) > 0) {
+      
+      # Count days of data
+      n_days <- NA
+      
+      # Try different date column approaches
+      if (length(date_cols) > 0) {
+        for (date_col in date_cols) {
+          if (date_col %in% names(df)) {
+            tryCatch({
+              if (grepl("date", date_col, ignore.case = TRUE)) {
+                # If it's a date column
+                dates <- as.Date(df[[date_col]])
+              } else {
+                # If it's a timestamp, extract date
+                timestamps <- as.POSIXct(df[[date_col]])
+                dates <- as.Date(timestamps)
+              }
+              n_days <- length(unique(dates[!is.na(dates)]))
+              break  # Use first successful date column
+            }, error = function(e) {
+              # Try next column
+            })
+          }
+        }
+      }
+      
+      subject_results[[i]] <- list(
+        subject_id = subject_id,
+        n_records = nrow(df),
+        n_days = n_days,
+        columns = names(df)
+      )
+    } else {
+      subject_results[[i]] <- list(
+        subject_id = subject_id,
+        n_records = 0,
+        n_days = 0,
+        columns = character(0)
+      )
+    }
+  }
+  
+  return(list(
+    modality = modality_name,
+    n_subjects = n_subjects,
+    subject_results = subject_results,
+    available_columns = modality_cols
+  ))
+}
+
+# Main analysis function
+run_coverage_analysis <- function() {
+  
+  # Define the data objects (assuming they are already loaded in environment)
+  data_objects <- list(
+    cgm = if(exists("data_cgm")) data_cgm else NULL,
+    hr = if(exists("data_hr")) data_hr else NULL,
+    kcal = if(exists("data_kcal")) data_kcal else NULL,
+    oxygen = if(exists("data_oxygen")) data_oxygen else NULL,
+    rr = if(exists("data_rr")) data_rr else NULL,
+    sleep = if(exists("data_sleep")) data_sleep else NULL,
+    steps = if(exists("data_steps")) data_steps else NULL,
+    stress = if(exists("data_stress")) data_stress else NULL
+  )
+  
+  # Remove NULL entries
+  data_objects <- data_objects[!sapply(data_objects, is.null)]
+  
+  if (length(data_objects) == 0) {
+    cat("No data objects found. Please ensure data is loaded with names like:\n")
+    cat("data_cgm, data_hr, data_kcal, data_oxygen, data_rr, data_sleep, data_stress, data_steps\n")
+    return(NULL)
+  }
+  
+  # Analyze each modality
+  results <- list()
+  
+  for (modality in names(data_objects)) {
+    results[[modality]] <- analyze_data_coverage(data_objects[[modality]], modality, col_info)
+  }
+  
+  return(results)
+}
+
+# Function to create summary tables
+create_summary_tables <- function(results) {
+  
+  # Summary table 1: Subjects per modality
+  subjects_summary <- data.frame(
+    Modality = character(),
+    N_Subjects = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Summary table 2: Days per subject per modality
+  days_summary <- data.frame(
+    Modality = character(),
+    Subject = character(),
+    N_Records = numeric(),
+    N_Days = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (modality in names(results)) {
+    result <- results[[modality]]
+    
+    # Add to subjects summary
+    subjects_summary <- rbind(subjects_summary, data.frame(
+      Modality = toupper(modality),
+      N_Subjects = result$n_subjects
+    ))
+    
+    # Add to days summary
+    for (subject_result in result$subject_results) {
+      days_summary <- rbind(days_summary, data.frame(
+        Modality = toupper(modality),
+        Subject = subject_result$subject_id,
+        N_Records = subject_result$n_records,
+        N_Days = ifelse(is.na(subject_result$n_days), 0, subject_result$n_days)
+      ))
+    }
+  }
+  
+  return(list(
+    subjects_summary = subjects_summary,
+    days_summary = days_summary
+  ))
+}
+```
+
+```{r run-analysis}
+# Run the analysis
+results <- run_coverage_analysis()
+
+if (!is.null(results)) {
+  summary_tables <- create_summary_tables(results)
+  subjects_df <- summary_tables$subjects_summary
+  days_df <- summary_tables$days_summary
+  
+  # Calculate summary statistics
+  days_summary_stats <- days_df %>%
+    filter(N_Days > 0) %>%
+    group_by(Modality) %>%
+    summarise(
+      N_Subjects_with_Data = n(),
+      Mean_Days = mean(N_Days, na.rm = TRUE),
+      Median_Days = median(N_Days, na.rm = TRUE),
+      Min_Days = min(N_Days, na.rm = TRUE),
+      Max_Days = max(N_Days, na.rm = TRUE),
+      SD_Days = sd(N_Days, na.rm = TRUE),
+      .groups = 'drop'
+    )
+}
+```
+
+## Data Summary
+
+::: {.panel-tabset}
+
+### Summary Tables
+
+#### Subjects per Modality
+```{r subjects-table}
+if (!is.null(results)) {
+  subjects_df %>%
+    arrange(desc(N_Subjects)) %>%
+    kable(col.names = c("Data Modality", "Number of Subjects"),
+          caption = "Number of subjects available in each data modality") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+}
+```
+
+#### Days Summary Statistics
+```{r days-summary-table}
+if (!is.null(results)) {
+  days_summary_stats %>%
+    mutate(across(where(is.numeric), ~round(.x, 1))) %>%
+    kable(col.names = c("Modality", "Subjects with Data", "Mean Days", "Median Days", 
+                        "Min Days", "Max Days", "SD Days"),
+          caption = "Summary statistics for days of data per subject by modality") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+}
+```
+
+### Detailed Data
+
+#### Interactive Subject-Level Data
+```{r detailed-table}
+if (!is.null(results)) {
+  days_df %>%
+    filter(N_Days > 0) %>%
+    arrange(Modality, desc(N_Days)) %>%
+    datatable(
+      caption = "Detailed view: Days and records per subject by modality",
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        searchHighlight = TRUE
+      ),
+      filter = 'top'
+    ) %>%
+    formatStyle(
+      'N_Days',
+      background = styleColorBar(range(days_df$N_Days[days_df$N_Days > 0]), 'lightblue'),
+      backgroundSize = '98% 88%',
+      backgroundRepeat = 'no-repeat',
+      backgroundPosition = 'center'
+    )
+}
+```
+
+:::
+
+## Visualizations
+
+::: {.panel-tabset}
+
+### Subject Coverage
+
+```{r subjects-plot}
+if (!is.null(results)) {
+  p1 <- ggplot(subjects_df, aes(x = reorder(Modality, N_Subjects), y = N_Subjects)) +
+    geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+    geom_text(aes(label = N_Subjects), hjust = -0.1, fontweight = "bold", size = 4) +
+    coord_flip() +
+    labs(title = "Number of Subjects per Data Modality",
+         subtitle = "Total subjects available in each health data modality",
+         x = "Data Modality",
+         y = "Number of Subjects") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      plot.subtitle = element_text(size = 12, color = "gray60"),
+      axis.text = element_text(size = 11),
+      panel.grid.minor = element_blank()
+    )
+  
+  # Make it interactive
+  ggplotly(p1, tooltip = c("x", "y")) %>%
+    layout(title = list(text = "Number of Subjects per Data Modality", 
+                       font = list(size = 16)))
+}
+```
+
+### Days Distribution
+
+```{r days-distribution-plot}
+if (!is.null(results)) {
+  days_filtered <- days_df %>% filter(N_Days > 0)
+  
+  if (nrow(days_filtered) > 0) {
+    p2 <- ggplot(days_filtered, aes(x = Modality, y = N_Days, fill = Modality)) +
+      geom_boxplot(alpha = 0.7, outlier.alpha = 0.6) +
+      geom_jitter(width = 0.2, alpha = 0.4, size = 1.5) +
+      coord_flip() +
+      scale_fill_brewer(type = "qual", palette = "Set2") +
+      labs(title = "Distribution of Days of Data per Subject",
+           subtitle = "Box plots showing the range and distribution of data collection periods",
+           x = "Data Modality",
+           y = "Days of Data") +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 16, face = "bold"),
+        plot.subtitle = element_text(size = 12, color = "gray60"),
+        legend.position = "none",
+        axis.text = element_text(size = 11),
+        panel.grid.minor = element_blank()
+      )
+    
+    ggplotly(p2, tooltip = c("x", "y")) %>%
+      layout(title = list(text = "Distribution of Days of Data per Subject", 
+                         font = list(size = 16)))
+  }
+}
+```
+
+### Average Days
+
+```{r avg-days-plot}
+if (!is.null(results)) {
+  p3 <- ggplot(days_summary_stats, aes(x = reorder(Modality, Mean_Days), y = Mean_Days)) +
+    geom_bar(stat = "identity", fill = "darkgreen", alpha = 0.8) +
+    geom_errorbar(aes(ymin = pmax(0, Mean_Days - SD_Days), ymax = Mean_Days + SD_Days), 
+                  width = 0.2, alpha = 0.8, color = "black") +
+    geom_text(aes(label = paste0(round(Mean_Days, 1), " days")), 
+              hjust = -0.1, fontweight = "bold", size = 4) +
+    coord_flip() +
+    labs(title = "Average Days of Data per Subject by Modality",
+         subtitle = "Mean values with standard deviation error bars",
+         x = "Data Modality",
+         y = "Average Days (± SD)") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      plot.subtitle = element_text(size = 12, color = "gray60"),
+      axis.text = element_text(size = 11),
+      panel.grid.minor = element_blank()
+    )
+  
+  ggplotly(p3, tooltip = c("x", "y")) %>%
+    layout(title = list(text = "Average Days of Data per Subject by Modality", 
+                       font = list(size = 16)))
+}
+```
+
+### Data Records
+
+```{r records-plot}
+if (!is.null(results)) {
+  # Create records summary
+  records_summary <- days_df %>%
+    group_by(Modality) %>%
+    summarise(
+      Total_Records = sum(N_Records, na.rm = TRUE),
+      Avg_Records_per_Subject = mean(N_Records, na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  p4 <- ggplot(records_summary, aes(x = reorder(Modality, Total_Records), y = Total_Records)) +
+    geom_bar(stat = "identity", fill = "purple", alpha = 0.8) +
+    geom_text(aes(label = scales::comma(Total_Records)), 
+              hjust = -0.1, fontweight = "bold", size = 4) +
+    coord_flip() +
+    scale_y_continuous(labels = scales::comma) +
+    labs(title = "Total Records per Data Modality",
+         subtitle = "Total number of data records across all subjects",
+         x = "Data Modality",
+         y = "Total Records") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      plot.subtitle = element_text(size = 12, color = "gray60"),
+      axis.text = element_text(size = 11),
+      panel.grid.minor = element_blank()
+    )
+  
+  ggplotly(p4, tooltip = c("x", "y")) %>%
+    layout(title = list(text = "Total Records per Data Modality", 
+                       font = list(size = 16)))
+}
+```
+
+:::
+
+## Key Findings
+
+```{r key-findings}
+if (!is.null(results)) {
+  # Calculate key statistics
+  total_subjects_max <- max(subjects_df$N_Subjects)
+  total_modalities <- nrow(subjects_df)
+  modality_with_most_subjects <- subjects_df$Modality[which.max(subjects_df$N_Subjects)]
+  
+  highest_avg_days <- days_summary_stats$Modality[which.max(days_summary_stats$Mean_Days)]
+  max_avg_days <- max(days_summary_stats$Mean_Days)
+  
+  total_records <- sum(days_df$N_Records)
+}
+```
+
+:::{.callout-note}
+## Summary Statistics
+
+- **Total Modalities Analyzed**: `r if(!is.null(results)) total_modalities else "N/A"`
+- **Maximum Subjects in Any Modality**: `r if(!is.null(results)) total_subjects_max else "N/A"` (in `r if(!is.null(results)) modality_with_most_subjects else "N/A"`)
+- **Highest Average Days**: `r if(!is.null(results)) round(max_avg_days, 1) else "N/A"` days (in `r if(!is.null(results)) highest_avg_days else "N/A"`)
+- **Total Data Records**: `r if(!is.null(results)) scales::comma(total_records) else "N/A"`
+:::
+
+## Data Loading Instructions
+
+To use this analysis, ensure your data is loaded in R with the following variable names:
+
+- `data_cgm` - List of dataframes for CGM data
+- `data_hr` - List of dataframes for heart rate data  
+- `data_kcal` - List of dataframes for calorie data
+- `data_oxygen` - List of dataframes for oxygen saturation data
+- `data_rr` - List of dataframes for respiratory rate data
+- `data_sleep` - List of dataframes for sleep data
+- `data_steps` - List of dataframes for steps data
+- `data_stress` - List of dataframes for stress data
+
+Each list should contain one dataframe per subject, and the `col_df.csv` file should be in your working directory.
+
+---
+
+*Analysis generated on `r Sys.Date()`*
