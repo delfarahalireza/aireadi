@@ -1,0 +1,994 @@
+---
+title: "AI-READI Exploratory Analysis v3"
+author: "Alireza Delfarah"
+date: "`r Sys.Date()`"
+engine: knitr
+
+format: 
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    code-summary: "Show R Code"
+    theme: flatly
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup, include=FALSE}
+
+# Load required libraries
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(gridExtra)
+library(DT)
+library(plotly)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(tidyr)
+library(lubridate)
+
+# Set global options
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load column information
+col_info <- read_csv("col_df.csv")
+
+# Set minimum days threshold
+MIN_DAYS_THRESHOLD <- 10
+```
+
+```{r read data}
+
+data_steps <- readRDS("aireadi_steps.rda")
+data_hr <- readRDS("aireadi_hr.rda")
+data_sleep <- readRDS("aireadi_sleep.rda")
+data_stress <- readRDS("aireadi_stress.rda")
+data_kcal <- readRDS("aireadi_kcal.rda")
+data_rr <- readRDS("aireadi_respiratory.rda")
+data_oxygen <- readRDS("aireadi_oxygen.rda")
+data_cgm <- readRDS("aireadi_cgm.rda")
+data_ecg <- readRDS("aireadi_ecg.rda")
+data_clinical <- readRDS("aireadi_clinical.rda")
+```
+
+## Overview
+
+This document provides a comprehensive analysis of health data coverage across multiple modalities. The analysis examines:
+
+1. **Number of subjects** present in each data modality (before and after filtering)
+2. **Days of data available** per subject in each modality
+3. **Subject filtering** based on minimum data requirement (≥`r MIN_DAYS_THRESHOLD` days)
+4. **Data missingness patterns** across modalities
+5. **Date ranges and temporal coverage** for each participant
+6. **Actual participant IDs** instead of generic subject labels
+
+```{r data-analysis-functions}
+
+# Function to extract participant ID from dataframe
+extract_participant_id <- function(df, modality_cols) {
+  participant_col <- modality_cols[grepl("participant_id", modality_cols, ignore.case = TRUE)][1]
+  
+  if (!is.null(participant_col) && participant_col %in% names(df) && nrow(df) > 0) {
+    # Get the first non-NA participant_id
+    participant_ids <- unique(df[[participant_col]][!is.na(df[[participant_col]])])
+    if (length(participant_ids) > 0) {
+      return(as.character(participant_ids[1]))
+    }
+  }
+  return(NA)
+}
+
+# Function to extract date ranges from dataframe
+extract_date_range <- function(df, modality_cols) {
+  # Find timestamp/date columns
+  date_cols <- modality_cols[grepl("date|timestamp|start_time|end_time", modality_cols, ignore.case = TRUE)]
+  
+  date_info <- list(
+    start_date = NA,
+    end_date = NA,
+    date_column_used = NA,
+    unique_dates = 0,
+    date_gaps = 0,
+    coverage_percentage = NA
+  )
+  
+  if (is.null(df) || nrow(df) == 0 || length(date_cols) == 0) {
+    return(date_info)
+  }
+  
+  # Try different date column approaches
+  for (date_col in date_cols) {
+    if (date_col %in% names(df)) {
+      tryCatch({
+        if (grepl("date", date_col, ignore.case = TRUE)) {
+          # If it's a date column
+          dates <- as.Date(df[[date_col]])
+        } else {
+          # If it's a timestamp, extract date
+          timestamps <- as.POSIXct(df[[date_col]])
+          dates <- as.Date(timestamps)
+        }
+        
+        # Remove NA dates
+        valid_dates <- dates[!is.na(dates)]
+        
+        if (length(valid_dates) > 0) {
+          unique_dates <- unique(valid_dates)
+          date_info$start_date <- min(unique_dates)
+          date_info$end_date <- max(unique_dates)
+          date_info$date_column_used <- date_col
+          date_info$unique_dates <- length(unique_dates)
+          
+          # Calculate date gaps
+          if (length(unique_dates) > 1) {
+            date_range <- seq(from = min(unique_dates), to = max(unique_dates), by = "day")
+            missing_dates <- length(date_range) - length(unique_dates)
+            date_info$date_gaps <- missing_dates
+            date_info$coverage_percentage <- (length(unique_dates) / length(date_range)) * 100
+          } else {
+            date_info$coverage_percentage <- 100
+          }
+          
+          break  # Use first successful date column
+        }
+      }, error = function(e) {
+        # Try next column
+      })
+    }
+  }
+  
+  return(date_info)
+}
+
+# Function to calculate missingness for a dataframe
+calculate_missingness <- function(df) {
+  if (is.null(df) || nrow(df) == 0) {
+    return(list(
+      total_values = 0,
+      missing_values = 0,
+      missing_percentage = 100,
+      columns_with_missing = character(0),
+      column_missingness = data.frame()
+    ))
+  }
+  
+  total_values <- nrow(df) * ncol(df)
+  missing_values <- sum(is.na(df))
+  missing_percentage <- (missing_values / total_values) * 100
+  
+  # Column-wise missingness
+  col_missing <- df %>%
+    summarise_all(~sum(is.na(.))) %>%
+    pivot_longer(everything(), names_to = "column", values_to = "missing_count") %>%
+    mutate(
+      total_rows = nrow(df),
+      missing_percentage = (missing_count / total_rows) * 100
+    ) %>%
+    arrange(desc(missing_percentage))
+  
+  columns_with_missing <- col_missing$column[col_missing$missing_count > 0]
+  
+  return(list(
+    total_values = total_values,
+    missing_values = missing_values,
+    missing_percentage = missing_percentage,
+    columns_with_missing = columns_with_missing,
+    column_missingness = col_missing
+  ))
+}
+
+# Function to analyze data coverage with participant IDs, missingness, and date ranges
+analyze_data_coverage <- function(data_list, modality_name, col_info) {
+  
+  # Get column names for this modality
+  modality_cols <- col_info %>% 
+    filter(modality == paste0("col_", modality_name)) %>%
+    select(-modality) %>%
+    unlist() %>%
+    na.omit() %>%
+    as.character()
+  
+  # Number of subjects
+  n_subjects <- length(data_list)
+  
+  # Analyze each subject's data
+  subject_results <- list()
+  modality_missingness <- list()
+  
+  for (i in 1:length(data_list)) {
+    df <- data_list[[i]]
+    
+    if (!is.null(df) && nrow(df) > 0) {
+      
+      # Extract participant ID
+      participant_id <- extract_participant_id(df, modality_cols)
+      if (is.na(participant_id)) {
+        participant_id <- paste0("Unknown_", i)
+      }
+      
+      # Calculate missingness
+      missingness_info <- calculate_missingness(df)
+      modality_missingness[[participant_id]] <- missingness_info
+      
+      # Extract date range information
+      date_info <- extract_date_range(df, modality_cols)
+      
+      subject_results[[i]] <- list(
+        participant_id = participant_id,
+        subject_index = i,
+        n_records = nrow(df),
+        n_days = date_info$unique_dates,
+        columns = names(df),
+        missingness = missingness_info,
+        date_range = date_info
+      )
+    } else {
+      # Handle empty/null dataframes
+      participant_id <- paste0("Empty_", i)
+      missingness_info <- calculate_missingness(df)
+      modality_missingness[[participant_id]] <- missingness_info
+      
+      date_info <- list(
+        start_date = NA,
+        end_date = NA,
+        date_column_used = NA,
+        unique_dates = 0,
+        date_gaps = 0,
+        coverage_percentage = NA
+      )
+      
+      subject_results[[i]] <- list(
+        participant_id = participant_id,
+        subject_index = i,
+        n_records = 0,
+        n_days = 0,
+        columns = character(0),
+        missingness = missingness_info,
+        date_range = date_info
+      )
+    }
+  }
+  
+  return(list(
+    modality = modality_name,
+    n_subjects = n_subjects,
+    subject_results = subject_results,
+    available_columns = modality_cols,
+    modality_missingness = modality_missingness
+  ))
+}
+
+# Function to filter subjects and track removals with participant IDs
+filter_subjects_by_days <- function(results, min_days = MIN_DAYS_THRESHOLD) {
+  
+  filtered_results <- results
+  removal_tracking <- list()
+  
+  for (modality in names(results)) {
+    result <- results[[modality]]
+    
+    # Track original subjects with participant IDs
+    original_participants <- sapply(result$subject_results, function(x) x$participant_id)
+    original_days <- sapply(result$subject_results, function(x) 
+      ifelse(is.na(x$n_days) || x$n_days == 0, 0, x$n_days))
+    
+    # Filter subjects with sufficient days
+    valid_subjects <- original_days >= min_days
+    filtered_subject_results <- result$subject_results[valid_subjects]
+    
+    # Track removals
+    removed_participants <- original_participants[!valid_subjects]
+    removed_days <- original_days[!valid_subjects]
+    
+    removal_tracking[[modality]] <- list(
+      original_count = length(original_participants),
+      filtered_count = length(filtered_subject_results),
+      removed_count = length(removed_participants),
+      removed_participants = removed_participants,
+      removed_days = removed_days,
+      removal_rate = length(removed_participants) / length(original_participants)
+    )
+    
+    # Update filtered results
+    filtered_results[[modality]]$subject_results <- filtered_subject_results
+    filtered_results[[modality]]$n_subjects <- length(filtered_subject_results)
+  }
+  
+  return(list(
+    filtered_results = filtered_results,
+    removal_tracking = removal_tracking
+  ))
+}
+
+# Function to create date range summary
+create_date_range_summary <- function(results) {
+  
+  date_range_summary <- data.frame(
+    Modality = character(),
+    Participant_ID = character(),
+    Start_Date = as.Date(character()),
+    End_Date = as.Date(character()),
+    N_Days = numeric(),
+    Date_Gaps = numeric(),
+    Coverage_Percentage = numeric(),
+    Date_Column_Used = character(),
+    Duration_Days = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (modality in names(results$filtered_results)) {
+    result <- results$filtered_results[[modality]]
+    
+    for (subject_result in result$subject_results) {
+      participant_id <- subject_result$participant_id
+      date_info <- subject_result$date_range
+      
+      # Calculate duration
+      duration_days <- NA
+      if (!is.na(date_info$start_date) && !is.na(date_info$end_date)) {
+        duration_days <- as.numeric(date_info$end_date - date_info$start_date) + 1
+      }
+      
+      date_range_summary <- rbind(date_range_summary, data.frame(
+        Modality = toupper(modality),
+        Participant_ID = participant_id,
+        Start_Date = as.Date(date_info$start_date),
+        End_Date = as.Date(date_info$end_date),
+        N_Days = date_info$unique_dates,
+        Date_Gaps = date_info$date_gaps,
+        Coverage_Percentage = round(date_info$coverage_percentage, 2),
+        Date_Column_Used = ifelse(is.na(date_info$date_column_used), "None", date_info$date_column_used),
+        Duration_Days = duration_days
+      ))
+    }
+  }
+  
+  return(date_range_summary)
+}
+
+# Function to create temporal overlap analysis
+create_temporal_overlap_analysis <- function(date_range_summary) {
+  
+  # Get overall date range across all modalities
+  all_start_dates <- date_range_summary$Start_Date[!is.na(date_range_summary$Start_Date)]
+  all_end_dates <- date_range_summary$End_Date[!is.na(date_range_summary$End_Date)]
+  
+  if (length(all_start_dates) == 0 || length(all_end_dates) == 0) {
+    return(NULL)
+  }
+  
+  overall_start <- min(all_start_dates)
+  overall_end <- max(all_end_dates)
+  
+  # Create overlap matrix by participant
+  participants <- unique(date_range_summary$Participant_ID)
+  modalities <- unique(date_range_summary$Modality)
+  
+  overlap_matrix <- expand.grid(
+    Participant_ID = participants,
+    Modality = modalities,
+    stringsAsFactors = FALSE
+  ) %>%
+    left_join(date_range_summary, by = c("Participant_ID", "Modality")) %>%
+    mutate(
+      Has_Data = !is.na(Start_Date),
+      Days_From_Overall_Start = ifelse(Has_Data, as.numeric(Start_Date - overall_start), NA),
+      Days_To_Overall_End = ifelse(Has_Data, as.numeric(overall_end - End_Date), NA)
+    )
+  
+  return(list(
+    overlap_matrix = overlap_matrix,
+    overall_start = overall_start,
+    overall_end = overall_end,
+    total_study_duration = as.numeric(overall_end - overall_start) + 1
+  ))
+}
+
+# Main analysis function
+run_coverage_analysis <- function() {
+  
+  # Define the data objects (assuming they are already loaded in environment)
+  data_objects <- list(
+    cgm = if(exists("data_cgm")) data_cgm else NULL,
+    hr = if(exists("data_hr")) data_hr else NULL,
+    kcal = if(exists("data_kcal")) data_kcal else NULL,
+    oxygen = if(exists("data_oxygen")) data_oxygen else NULL,
+    rr = if(exists("data_rr")) data_rr else NULL,
+    sleep = if(exists("data_sleep")) data_sleep else NULL,
+    steps = if(exists("data_steps")) data_steps else NULL,
+    stress = if(exists("data_stress")) data_stress else NULL
+  )
+  
+  # Remove NULL entries
+  data_objects <- data_objects[!sapply(data_objects, is.null)]
+  
+  if (length(data_objects) == 0) {
+    cat("No data objects found. Please ensure data is loaded with names like:\n")
+    cat("data_cgm, data_hr, data_kcal, data_oxygen, data_rr, data_sleep, data_stress, data_steps\n")
+    return(NULL)
+  }
+  
+  # Analyze each modality
+  raw_results <- list()
+  
+  for (modality in names(data_objects)) {
+    raw_results[[modality]] <- analyze_data_coverage(data_objects[[modality]], modality, col_info)
+  }
+  
+  # Filter subjects and track removals
+  filtering_output <- filter_subjects_by_days(raw_results, MIN_DAYS_THRESHOLD)
+  
+  return(list(
+    raw_results = raw_results,
+    filtered_results = filtering_output$filtered_results,
+    removal_tracking = filtering_output$removal_tracking
+  ))
+}
+
+# Function to create summary tables with participant IDs
+create_summary_tables <- function(results) {
+  
+  # Summary table 1: Subjects per modality (before and after filtering)
+  subjects_summary <- data.frame(
+    Modality = character(),
+    Original_N_Subjects = numeric(),
+    Filtered_N_Subjects = numeric(),
+    Removed_N_Subjects = numeric(),
+    Removal_Rate = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Summary table 2: Days per subject per modality (filtered data only)
+  days_summary <- data.frame(
+    Modality = character(),
+    Participant_ID = character(),
+    N_Records = numeric(),
+    N_Days = numeric(),
+    Missing_Percentage = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (modality in names(results$filtered_results)) {
+    result <- results$filtered_results[[modality]]
+    removal_info <- results$removal_tracking[[modality]]
+    
+    # Add to subjects summary
+    subjects_summary <- rbind(subjects_summary, data.frame(
+      Modality = toupper(modality),
+      Original_N_Subjects = removal_info$original_count,
+      Filtered_N_Subjects = removal_info$filtered_count,
+      Removed_N_Subjects = removal_info$removed_count,
+      Removal_Rate = removal_info$removal_rate * 100
+    ))
+    
+    # Add to days summary (filtered data only)
+    for (subject_result in result$subject_results) {
+      days_summary <- rbind(days_summary, data.frame(
+        Modality = toupper(modality),
+        Participant_ID = subject_result$participant_id,
+        N_Records = subject_result$n_records,
+        N_Days = ifelse(is.na(subject_result$n_days), 0, subject_result$n_days),
+        Missing_Percentage = round(subject_result$missingness$missing_percentage, 2)
+      ))
+    }
+  }
+  
+  return(list(
+    subjects_summary = subjects_summary,
+    days_summary = days_summary
+  ))
+}
+
+# Function to create missingness summary
+create_missingness_summary <- function(results) {
+  
+  missingness_summary <- data.frame(
+    Modality = character(),
+    Participant_ID = character(),
+    Total_Values = numeric(),
+    Missing_Values = numeric(),
+    Missing_Percentage = numeric(),
+    Columns_With_Missing = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Detailed column missingness
+  detailed_missingness <- data.frame(
+    Modality = character(),
+    Participant_ID = character(),
+    Column = character(),
+    Missing_Count = numeric(),
+    Total_Rows = numeric(),
+    Missing_Percentage = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (modality in names(results$filtered_results)) {
+    result <- results$filtered_results[[modality]]
+    
+    for (subject_result in result$subject_results) {
+      participant_id <- subject_result$participant_id
+      missingness <- subject_result$missingness
+      
+      # Add to summary
+      missingness_summary <- rbind(missingness_summary, data.frame(
+        Modality = toupper(modality),
+        Participant_ID = participant_id,
+        Total_Values = missingness$total_values,
+        Missing_Values = missingness$missing_values,
+        Missing_Percentage = round(missingness$missing_percentage, 2),
+        Columns_With_Missing = length(missingness$columns_with_missing)
+      ))
+      
+      # Add detailed column missingness
+      if (nrow(missingness$column_missingness) > 0) {
+        col_miss_data <- missingness$column_missingness %>%
+          mutate(
+            Modality = toupper(modality),
+            Participant_ID = participant_id
+          ) %>%
+          select(Modality, Participant_ID, Column = column, 
+                 Missing_Count = missing_count, Total_Rows = total_rows,
+                 Missing_Percentage = missing_percentage)
+        
+        detailed_missingness <- rbind(detailed_missingness, col_miss_data)
+      }
+    }
+  }
+  
+  return(list(
+    summary = missingness_summary,
+    detailed = detailed_missingness
+  ))
+}
+
+# Function to create modality-level missingness statistics
+create_modality_missingness_stats <- function(missingness_data) {
+  
+  modality_stats <- missingness_data$summary %>%
+    group_by(Modality) %>%
+    summarise(
+      N_Participants = n(),
+      Mean_Missing_Percentage = round(mean(Missing_Percentage, na.rm = TRUE), 2),
+      Median_Missing_Percentage = round(median(Missing_Percentage, na.rm = TRUE), 2),
+      Min_Missing_Percentage = round(min(Missing_Percentage, na.rm = TRUE), 2),
+      Max_Missing_Percentage = round(max(Missing_Percentage, na.rm = TRUE), 2),
+      SD_Missing_Percentage = round(sd(Missing_Percentage, na.rm = TRUE), 2),
+      Total_Missing_Values = sum(Missing_Values, na.rm = TRUE),
+      Total_Values = sum(Total_Values, na.rm = TRUE),
+      Overall_Missing_Percentage = round((sum(Missing_Values, na.rm = TRUE) / sum(Total_Values, na.rm = TRUE)) * 100, 2),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(Overall_Missing_Percentage))
+  
+  return(modality_stats)
+}
+```
+
+```{r run-analysis}
+
+# Run the analysis
+results <- run_coverage_analysis()
+
+if (!is.null(results)) {
+  summary_tables <- create_summary_tables(results)
+  subjects_df <- summary_tables$subjects_summary
+  days_df <- summary_tables$days_summary
+  
+  # Create missingness analysis
+  missingness_data <- create_missingness_summary(results)
+  modality_missingness_stats <- create_modality_missingness_stats(missingness_data)
+  
+  # Create date range analysis
+  date_range_summary <- create_date_range_summary(results)
+  temporal_overlap <- create_temporal_overlap_analysis(date_range_summary)
+  
+  # Calculate summary statistics (filtered data)
+  days_summary_stats <- days_df %>%
+    filter(N_Days > 0) %>%
+    group_by(Modality) %>%
+    summarise(
+      N_Subjects_with_Data = n(),
+      Mean_Days = mean(N_Days, na.rm = TRUE),
+      Median_Days = median(N_Days, na.rm = TRUE),
+      Min_Days = min(N_Days, na.rm = TRUE),
+      Max_Days = max(N_Days, na.rm = TRUE),
+      SD_Days = sd(N_Days, na.rm = TRUE),
+      Mean_Missing_Percentage = mean(Missing_Percentage, na.rm = TRUE),
+      Median_Missing_Percentage = median(Missing_Percentage, na.rm = TRUE),
+      .groups = 'drop'
+    )
+}
+```
+
+## Data Summary
+
+::: {.panel-tabset}
+
+### Filtering Summary
+
+#### Subject Removal Summary
+```{r filtering-table}
+
+if (!is.null(results)) {
+  subjects_df %>%
+    arrange(desc(Removal_Rate)) %>%
+    mutate(Removal_Rate = paste0(round(Removal_Rate, 1), "%")) %>%
+    kable(col.names = c("Modality", "Original Subjects", "Filtered Subjects", 
+                        "Removed Subjects", "Removal Rate"),
+          caption = paste0("Subject filtering summary (minimum ", MIN_DAYS_THRESHOLD, " days requirement)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+    column_spec(5, color = ifelse(as.numeric(gsub("%", "", subjects_df$Removal_Rate)) > 50, "red", "black"))
+}
+```
+
+### Date Range Analysis
+
+#### Date Coverage Summary by Participant
+```{r date-range-table}
+
+if (!is.null(results) && exists("date_range_summary")) {
+  date_range_summary %>%
+    arrange(Modality, Participant_ID) %>%
+    mutate(
+      Start_Date = as.character(Start_Date),
+      End_Date = as.character(End_Date),
+      Coverage_Percentage = ifelse(is.na(Coverage_Percentage), "N/A", paste0(round(Coverage_Percentage, 1), "%"))
+    ) %>%
+    datatable(
+      caption = "Date ranges and coverage for each participant by modality (filtered data)",
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        searchHighlight = TRUE
+      ),
+      filter = 'top'
+    ) %>%
+    formatStyle(
+      'N_Days',
+      background = styleColorBar(range(date_range_summary$N_Days, na.rm = TRUE), 'lightblue'),
+      backgroundSize = '98% 88%',
+      backgroundRepeat = 'no-repeat',
+      backgroundPosition = 'center'
+    ) %>%
+    formatStyle(
+      'Date_Gaps',
+      color = styleInterval(c(0, 5, 15), c('green', 'orange', 'red', 'darkred'))
+    )
+}
+```
+
+#### Temporal Coverage Statistics
+```{r temporal-stats-table}
+
+if (!is.null(results) && exists("date_range_summary")) {
+  temporal_stats <- date_range_summary %>%
+    filter(!is.na(Start_Date)) %>%
+    group_by(Modality) %>%
+    summarise(
+      N_Participants = n(),
+      Earliest_Start = min(Start_Date, na.rm = TRUE),
+      Latest_End = max(End_Date, na.rm = TRUE),
+      Mean_Duration = round(mean(Duration_Days, na.rm = TRUE), 1),
+      Median_Duration = round(median(Duration_Days, na.rm = TRUE), 1),
+      Mean_Coverage = round(mean(Coverage_Percentage, na.rm = TRUE), 1),
+      Mean_Gaps = round(mean(Date_Gaps, na.rm = TRUE), 1),
+      .groups = 'drop'
+    ) %>%
+    mutate(
+      Study_Span_Days = as.numeric(Latest_End - Earliest_Start) + 1,
+      Earliest_Start = as.character(Earliest_Start),
+      Latest_End = as.character(Latest_End)
+    )
+  
+  temporal_stats %>%
+    kable(col.names = c("Modality", "N Participants", "Earliest Start", "Latest End", 
+                        "Mean Duration (Days)", "Median Duration (Days)", 
+                        "Mean Coverage (%)", "Mean Gaps", "Study Span (Days)"),
+          caption = "Temporal coverage statistics by modality") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+}
+```
+
+### Missingness Analysis
+
+#### Modality-Level Missingness Statistics
+```{r modality-missingness-table}
+
+if (!is.null(results)) {
+  modality_missingness_stats %>%
+    kable(col.names = c("Modality", "N Participants", "Mean Missing %", "Median Missing %", 
+                        "Min Missing %", "Max Missing %", "SD Missing %", 
+                        "Total Missing Values", "Total Values", "Overall Missing %"),
+          caption = "Missingness statistics by modality (filtered data)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+    column_spec(10, color = ifelse(modality_missingness_stats$Overall_Missing_Percentage > 20, "red", 
+                                  ifelse(modality_missingness_stats$Overall_Missing_Percentage > 10, "orange", "green")))
+}
+```
+
+#### Participant-Level Missingness Summary
+```{r participant-missingness-table}
+
+if (!is.null(results)) {
+  missingness_data$summary %>%
+    arrange(Modality, desc(Missing_Percentage)) %>%
+    datatable(
+      caption = "Missingness by participant and modality (filtered data)",
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        searchHighlight = TRUE
+      ),
+      filter = 'top'
+    ) %>%
+    formatStyle(
+      'Missing_Percentage',
+      background = styleColorBar(range(missingness_data$summary$Missing_Percentage), 'lightcoral'),
+      backgroundSize = '98% 88%',
+      backgroundRepeat = 'no-repeat',
+      backgroundPosition = 'center'
+    ) %>%
+    formatStyle(
+      'Missing_Percentage',
+      color = styleInterval(c(10, 20, 50), c('black', 'darkorange', 'red', 'darkred'))
+    )
+}
+```
+
+### Summary Tables
+
+#### Subjects per Modality (After Filtering)
+```{r subjects-table}
+
+if (!is.null(results)) {
+  subjects_df %>%
+    select(Modality, Filtered_N_Subjects) %>%
+    arrange(desc(Filtered_N_Subjects)) %>%
+    kable(col.names = c("Data Modality", "Number of Subjects (≥5 days)"),
+          caption = "Number of subjects with sufficient data in each modality") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+}
+```
+
+#### Days Summary Statistics (Filtered Data)
+```{r days-summary-table}
+if (!is.null(results)) {
+  days_summary_stats %>%
+    mutate(across(where(is.numeric), ~round(.x, 1))) %>%
+    kable(col.names = c("Modality", "Subjects with Data", "Mean Days", "Median Days", 
+                        "Min Days", "Max Days", "SD Days", "Mean Missing %", "Median Missing %"),
+          caption = "Summary statistics for days of data per subject by modality (filtered data)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+}
+```
+
+### Detailed Data
+
+#### Interactive Subject-Level Data (Filtered)
+```{r detailed-table}
+
+if (!is.null(results)) {
+  days_df %>%
+    filter(N_Days > 0) %>%
+    arrange(Modality, desc(N_Days)) %>%
+    datatable(
+      caption = "Detailed view: Days
+      of data per subject by modality (filtered data)",
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        searchHighlight = TRUE,
+        dom = 'Bfrtip',
+        buttons = c('copy', 'csv', 'excel')
+      ),
+      filter = 'top'
+    ) %>%
+    formatStyle(
+      'N_Days',
+      background = styleColorBar(range(days_df$N_Days[days_df$N_Days > 0]), 'lightblue'),
+      backgroundSize = '98% 88%',
+      backgroundRepeat = 'no-repeat',
+      backgroundPosition = 'center'
+    ) %>%
+    formatStyle(
+      'Missing_Percentage',
+      background = styleColorBar(range(days_df$Missing_Percentage), 'lightcoral'),
+      backgroundSize = '98% 88%',
+      backgroundRepeat = 'no-repeat',
+      backgroundPosition = 'center'
+    )
+}
+```
+
+:::
+
+## Visualizations
+
+::: {.panel-tabset}
+
+### Subject Distribution
+
+```{r subject-distribution-plot}
+
+if (!is.null(results)) {
+  p1 <- subjects_df %>%
+    arrange(desc(Filtered_N_Subjects)) %>%
+    ggplot(aes(x = reorder(Modality, Filtered_N_Subjects), y = Filtered_N_Subjects)) +
+    geom_col(fill = "steelblue", alpha = 0.8) +
+    geom_text(aes(label = Filtered_N_Subjects), hjust = -0.1, size = 3.5) +
+    coord_flip() +
+    labs(
+      title = paste0("Number of Subjects per Modality (≥", MIN_DAYS_THRESHOLD, " days)"),
+      x = "Data Modality",
+      y = "Number of Subjects"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 14, face = "bold"),
+      axis.text = element_text(size = 11),
+      axis.title = element_text(size = 12)
+    )
+  
+  print(p1)
+}
+```
+
+### Days Distribution
+
+```{r days-distribution-plot}
+
+if (!is.null(results)) {
+  # Box plot of days distribution
+  p2 <- days_df %>%
+    filter(N_Days > 0) %>%
+    ggplot(aes(x = reorder(Modality, N_Days, median), y = N_Days, fill = Modality)) +
+    geom_boxplot(alpha = 0.7, outlier.alpha = 0.5) +
+    geom_jitter(width = 0.2, alpha = 0.6, size = 1) +
+    coord_flip() +
+    labs(
+      title = "Distribution of Days of Data per Subject by Modality",
+      x = "Data Modality",
+      y = "Number of Days"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 14, face = "bold"),
+      axis.text = element_text(size = 11),
+      axis.title = element_text(size = 12),
+      legend.position = "none"
+    ) +
+    scale_fill_viridis_d()
+  
+  print(p2)
+}
+```
+
+:::
+
+## Column-Level Analysis
+
+::: {.panel-tabset}
+
+### Column-Level Missingness
+
+```{r column-missingness-table}
+
+if (!is.null(results)) {
+  # Show detailed column missingness for columns with >0% missing
+  high_missingness_cols <- missingness_data$detailed %>%
+    filter(Missing_Percentage > 0) %>%
+    arrange(desc(Missing_Percentage))
+  
+  if (nrow(high_missingness_cols) > 0) {
+    high_missingness_cols %>%
+      datatable(
+        caption = "Column-level missingness analysis (columns with missing data only)",
+        options = list(
+          pageLength = 15,
+          scrollX = TRUE,
+          searchHighlight = TRUE
+        ),
+        filter = 'top'
+      ) %>%
+      formatStyle(
+        'Missing_Percentage',
+        background = styleColorBar(range(high_missingness_cols$Missing_Percentage), 'lightcoral'),
+        backgroundSize = '98% 88%',
+        backgroundRepeat = 'no-repeat',
+        backgroundPosition = 'center'
+      ) %>%
+      formatStyle(
+        'Missing_Percentage',
+        color = styleInterval(c(25, 50, 75), c('black', 'darkorange', 'red', 'darkred'))
+      )
+  } else {
+    cat("No columns with missing data found in the filtered dataset.")
+  }
+}
+```
+
+:::
+
+## Cross-Modality Analysis
+
+::: {.panel-tabset}
+
+### Participant Overlap Matrix
+
+```{r overlap-matrix}
+
+if (!is.null(results)) {
+  # Create participant overlap matrix
+  participant_modality_matrix <- days_df %>%
+    filter(N_Days > 0) %>%
+    select(Modality, Participant_ID) %>%
+    mutate(Has_Data = 1) %>%
+    pivot_wider(names_from = Modality, values_from = Has_Data, values_fill = 0)
+  
+  if (nrow(participant_modality_matrix) > 0) {
+    participant_modality_matrix %>%
+      datatable(
+        caption = "Participant data availability matrix (1 = has data, 0 = no data)",
+        options = list(
+          pageLength = 15,
+          scrollX = TRUE,
+          searchHighlight = TRUE
+        ),
+        filter = 'top'
+      ) %>%
+      formatStyle(
+        columns = names(participant_modality_matrix)[-1],
+        backgroundColor = styleEqual(c(0, 1), c('lightcoral', 'lightgreen'))
+      )
+  }
+}
+```
+
+### Multi-Modality Coverage Summary
+
+```{r multi-modality-summary}
+
+if (!is.null(results)) {
+  # Calculate how many modalities each participant has data for
+  modality_coverage <- days_df %>%
+    filter(N_Days > 0) %>%
+    group_by(Participant_ID) %>%
+    summarise(
+      N_Modalities = n(),
+      Modalities_List = paste(Modality, collapse = ", "),
+      Total_Days = sum(N_Days),
+      Mean_Days_Per_Modality = round(mean(N_Days), 1),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(N_Modalities), desc(Total_Days))
+  
+  modality_coverage %>%
+    datatable(
+      caption = "Multi-modality data coverage per participant",
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        searchHighlight = TRUE
+      ),
+      filter = 'top'
+    ) %>%
+    formatStyle(
+      'N_Modalities',
+      background = styleColorBar(range(modality_coverage$N_Modalities), 'lightblue'),
+      backgroundSize = '98% 88%',
+      backgroundRepeat = 'no-repeat',
+      backgroundPosition = 'center'
+    )
+}
+```
+
+:::
+
+*Analysis generated on `r Sys.Date()`*
